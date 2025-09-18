@@ -1,5 +1,5 @@
 import argv
-import gleam/erlang/process.{type Subject}
+import gleam/erlang/process.{type Subject, receive}
 import gleam/float
 import gleam/int
 import gleam/io
@@ -10,121 +10,104 @@ import gleam/result
 import gleam/time/duration
 import gleam/time/timestamp
 
-pub fn main() {
-  let time_start = timestamp.system_time()
-  let args = argv.load()
-  //drop the program name from list
-  let params = result.unwrap(list.rest(args.arguments), [])
-  case params {
-    [num_nodes, topology, algorithm] -> {
-      let n = result.unwrap(int.parse(num_nodes), 0)
-      //reate n nodes with correct topology      
-      let empty_actors = []
-      let actors = start_workers(n, topology, algorithm, empty_actors)
+pub fn main() -> Nil {
+  let assert Ok(args) = list.rest(argv.load().arguments)
+  let len = list.length(args)
+  case len {
+    3 -> {
+      //get num of nodes
+      let assert Ok(num_string) = list.first(args)
+      let assert Ok(n) = int.parse(num_string)
+      //throw away num nodes and get topology
+      let assert Ok(args) = list.rest(args)
+      let assert Ok(topology) = list.first(args)
+      //throw away topology and get alogorithm
+      let assert Ok(args) = list.rest(args)
+      let assert Ok(algorithm) = list.first(args)
+      //set up monitor
+      let reply_subject = process.new_subject()
 
-      //tell first worker to start, and what algorithm to follow
-      case actors {
-        [] -> io.println("no actors!")
-        [first, ..] -> {
-          let subject = pair.second(first)
-          actor.send(subject, Start(algorithm))
+      let monitor_state = MonitorState(0, 1, reply_subject)
+      let assert Ok(monitor) =
+        actor.new(monitor_state)
+        |> actor.on_message(monitor_handle_message)
+        |> actor.start
+
+      //set up actors
+      let empty_actors = []
+      //round n to nearest perfect cube if necessary
+      let n = case topology {
+        "3D" -> get_perfect_cube(n)
+        "imp3D" -> get_perfect_cube(n)
+        _ -> n
+      }
+
+      let actors =
+        start_workers(n, topology, algorithm, empty_actors, monitor.data)
+
+      let time_start = timestamp.system_time()
+      //start actors
+      let random_actor = rand_neighbor_subj(actors)
+      case algorithm {
+        "gossip" -> {
+          actor.send(random_actor, Gossip(8.0))
+        }
+        "push-sum" -> {
+          actor.send(random_actor, Start)
+        }
+        _ -> {
+          io.println("Invalid algorithm")
         }
       }
-      Nil
+      case receive(reply_subject, 5000) {
+        // timeout in ms
+        Ok(time_end) -> {
+          let duration = timestamp.difference(time_start, time_end)
+          io.println(float.to_string(duration.to_seconds(duration)))
+        }
+        Error(_) -> io.println("Monitor timeout")
+      }
     }
     _ -> io.println("Wrong number of arguments")
   }
-
-  let time_end = timestamp.system_time()
-  let duration = timestamp.difference(time_start, time_end)
-  let time = duration.to_seconds(duration)
-  io.println(float.to_string(time))
 }
 
-pub fn start_workers(
-  n: Int,
-  topology: String,
-  algorithm: String,
-  workers: List(#(Int, Subject(Message))),
-) -> List(#(Int, Subject(Message))) {
-  case n > 0 {
-    True -> {
-      //initial state will depend on the algorithm
-      let initial_state = build_state(n, algorithm)
-
-      let assert Ok(actor) =
-        //set up actor
-        actor.new(initial_state)
-        |> actor.on_message(worker_handle_message)
-        |> actor.start
-
-      //add new actor to list
-      let new_workers = list.append(workers, [#(n - 1, actor.data)])
-      //recurse until n actors have been made
-      start_workers(n - 1, topology, algorithm, new_workers)
-    }
-    False -> {
-      //once all actors have been created, set up topology
-      assign_neighbors(list.length(workers), topology, workers)
-      workers
-    }
-  }
+///tracker
+pub type MonitorMessage {
+  Update
 }
 
-pub fn build_state(n: Int, algorithm: String) {
-  case algorithm {
-    "gossip" -> {
-      State(1.0, 0.0, 0, [])
-      //val1 represents rumor, val2 = num times node has received rumor
-    }
-    "push-sum" -> {
-      let n_float = int.to_float(n)
-
-      State(n_float, 1.0, 0, [])
-      //val1 = sum, val2 = weight
-    }
-    _ -> {
-      io.println("invalid algorithm input")
-      State(0.0, 0.0, 0, [])
-    }
-  }
+pub type MonitorState {
+  MonitorState(
+    count: Int,
+    // number of actors that have reached convergence
+    total: Int,
+    // total number of actors to wait for
+    reply_to: Subject(timestamp.Timestamp),
+    // main process to notify when done
+  )
 }
 
-pub fn assign_neighbors(
-  n: Int,
-  topology: String,
-  actors: List(#(Int, Subject(Message))),
-) {
-  case n {
-    //if n=0, we are done, else treat the current actor
-    0 -> io.println("full topology created")
-    _ -> {
-      //get nth actor (index n-1)
-      let assert Ok(result) =
-        list.find(actors, fn(x) { pair.first(x) == n - 1 })
-      let subject = pair.second(result)
-      //send neighbors to actor based on topology
-      case topology {
-        "full" -> {
-          //actor gets every actor as neighbor
-          let neighbors = get_full_neighbors(n, actors)
-          actor.send(subject, NeighborSetUp(neighbors))
+fn monitor_handle_message(
+  state: MonitorState,
+  message: MonitorMessage,
+) -> actor.Next(MonitorState, MonitorMessage) {
+  case message {
+    Update -> {
+      let new_count = state.count + 1
+      io.println("received convergence message")
+      case new_count == state.total {
+        True -> {
+          // all actors have converged, notify main process
+          let now = timestamp.system_time()
+          actor.send(state.reply_to, now)
+          actor.stop()
         }
-        "3D" -> {
-          let neighbors = get_3d_neighbors(n, actors)
-          actor.send(subject, NeighborSetUp(neighbors))
+        False -> {
+          // keep waiting for more updates
+          actor.continue(MonitorState(new_count, state.total, state.reply_to))
         }
-        "line" -> {
-          let neighbors = get_line_neighbors(n, actors)
-          actor.send(subject, NeighborSetUp(neighbors))
-        }
-        "imp3D" -> io.println("imperfect 3d topology")
-        //TODO: 3d grid, plus one extra random neighbor each
-        _ -> io.println("invalid topology input")
       }
-
-      //recurse with next neighbor
-      assign_neighbors(n - 1, topology, actors)
     }
   }
 }
@@ -132,9 +115,23 @@ pub fn assign_neighbors(
 ///worker message def
 pub type Message {
   PushSum(sum: Float, weight: Float)
-  Gossip
+  Gossip(Float)
   NeighborSetUp(List(#(Int, Subject(Message))))
-  Start(algorithm: String)
+  Start
+}
+
+pub type State {
+  State(
+    val1: Float,
+    //rumor for gossip, sum for push-sum
+    val2: Float,
+    //num times heard for gossip, weight for push-sum
+    val3: Int,
+    //stays 0 for gossip, num times unchanged for push-sum
+    neighbors: List(#(Int, Subject(Message))),
+    //neighbors, assigned based on topology
+    monitor: Subject(MonitorMessage),
+  )
 }
 
 ///define the start fucntion for when a worker is messaaged
@@ -152,7 +149,7 @@ fn worker_handle_message(
       let curr_weight = state.val2 +. weight
       let halved_weight = curr_weight /. 2.0
       //pick random neighbor to pass half to
-      let subject = find_random_actor(state.neighbors)
+      let subject = rand_neighbor_subj(state.neighbors)
       //send half of new sum and weight to neighbor
       actor.send(subject, PushSum(halved_sum, halved_weight))
 
@@ -169,134 +166,162 @@ fn worker_handle_message(
 
       case num_repeats == 3 {
         True -> {
+          actor.send(state.monitor, Update)
           actor.stop()
         }
         False -> {
           //set new state and continue
           let new_state =
-            State(halved_sum, halved_weight, num_repeats, state.neighbors)
+            State(
+              halved_sum,
+              halved_weight,
+              num_repeats,
+              state.neighbors,
+              state.monitor,
+            )
           actor.continue(new_state)
         }
       }
     }
-    Gossip -> {
-      //do gossip alg
+    Gossip(rumor) -> {
+      //if you still have more time to hear the rumor
+      case state.val2 >. 0.0 {
+        True -> {
+          case state.val1 == 0.0 {
+            True -> {
+              //actor has reached convergence
+              actor.send(state.monitor, Update)
+            }
+            False -> Nil
+          }
+          let new_count = float.subtract(state.val2, 1.0)
+          let neighbor = rand_neighbor_subj(state.neighbors)
+          actor.send(neighbor, Gossip(rumor))
+          let new_state =
+            State(rumor, new_count, 0, state.neighbors, state.monitor)
+          actor.continue(new_state)
+        }
+        False -> {
+          io.println("I will no longer hear the rumor")
+          actor.stop()
+        }
+      }
       actor.stop()
     }
     NeighborSetUp(neighbors) -> {
       //receive list of neighbors
-      let new_state = State(state.val1, state.val2, 0, neighbors)
+      let new_state = State(state.val1, state.val2, 0, neighbors, state.monitor)
       actor.continue(new_state)
     }
-    Start(algorithm) -> {
-      //send the first message for the algorithm type provided
-      case algorithm {
-        "push-sum" -> {
-          //set values to half
-          let halved_sum = state.val1 /. 2.0
-          let halved_weight = state.val2 /. 2.0
-          //pick random neighbor to send values to
-          let subject = find_random_actor(state.neighbors)
-          actor.send(subject, PushSum(halved_sum, halved_weight))
-          //set up new state with half values
-          let new_state = State(halved_sum, halved_weight, 0, state.neighbors)
-          actor.continue(new_state)
-        }
-        "gossip" -> {
-          actor.continue(state)
-        }
-        _ -> {
-          actor.continue(state)
-        }
-      }
+    Start -> {
+      //only needed for push algorithm
+      //set values to half
+      let halved_sum = state.val1 /. 2.0
+      let halved_weight = state.val2 /. 2.0
+      //pick random neighbor to send values to
+      let subject = rand_neighbor_subj(state.neighbors)
+      actor.send(subject, PushSum(halved_sum, halved_weight))
+      //set up new state with half values
+      let new_state =
+        State(halved_sum, halved_weight, 0, state.neighbors, state.monitor)
+      actor.continue(new_state)
     }
   }
 }
 
-pub type State {
-  State(
-    val1: Float,
-    //rumor for gossip, sum for push-sum
-    val2: Float,
-    //num times heard for gossip, weight for push-sum
-    val3: Int,
-    //stays 0 for gossip, num times unchanged for push-sum
-    neighbors: List(#(Int, Subject(Message))),
-    //neighbors, assigned based on topology
-  )
-}
+pub fn build_state(n: Int, algorithm: String, monitor: Subject(MonitorMessage)) {
+  case algorithm {
+    "gossip" -> {
+      State(0.0, 10.0, 0, [], monitor)
+      //val1 represents rumor, val2 = num times node has received rumor
+    }
+    "push-sum" -> {
+      let n_float = int.to_float(n)
 
-pub fn find_random_actor(
-  list: List(#(Int, process.Subject(Message))),
-) -> process.Subject(Message) {
-  let num_actors = list.length(list)
-  let rando = int.random(num_actors)
-  let assert Ok(result) = list.find(list, fn(x) { pair.first(x) == rando })
-  pair.second(result)
-}
-
-pub fn find_random_neighbor(
-  list: List(#(Int, process.Subject(Message))),
-) -> #(Int, Subject(Message)) {
-  let num_actors = list.length(list)
-  let rando = int.random(num_actors)
-  let assert Ok(result) = list.find(list, fn(x) { pair.first(x) == rando })
-  result
-}
-
-pub fn get_full_neighbors(
-  n: Int,
-  actors: List(#(Int, Subject(Message))),
-) -> List(#(Int, Subject(Message))) {
-  //filter out the node itself
-  list.filter(actors, fn(x) {
-    let #(index, _subj) = x
-    index != n - 1
-  })
-}
-
-pub fn get_line_neighbors(
-  n: Int,
-  actors: List(#(Int, Subject(Message))),
-) -> List(#(Int, Subject(Message))) {
-  //handle edge cases first
-  let last = list.length(actors)
-  case n {
-    1 -> {
-      //if n=1, first actor has index 0, gets one neighbor at index 1
-      let next = list.find(actors, fn(x) { pair.first(x) == n })
-      let neighbors = case next {
-        Ok(val) -> [val]
-        Error(_) -> []
-      }
-      neighbors
+      State(n_float, 1.0, 0, [], monitor)
+      //val1 = sum, val2 = weight
     }
     _ -> {
-      //if last actor, has index l-1, gets neighbor with index n-2
-      case n == last {
-        True -> {
-          let prev = list.find(actors, fn(x) { pair.first(x) == n - 2 })
-          let neighbors = case prev {
-            Ok(val) -> [val]
-            Error(_) -> []
-          }
-          neighbors
+      io.println("invalid algorithm input")
+      State(0.0, 0.0, 0, [], monitor)
+    }
+  }
+}
+
+pub fn start_workers(
+  n: Int,
+  topology: String,
+  algorithm: String,
+  workers: List(#(Int, Subject(Message))),
+  monitor: Subject(MonitorMessage),
+) -> List(#(Int, Subject(Message))) {
+  case n > 0 {
+    True -> {
+      //initial state will depend on the algorithm
+      let initial_state = build_state(n, algorithm, monitor)
+
+      let assert Ok(actor) =
+        //set up actor
+        actor.new(initial_state)
+        |> actor.on_message(worker_handle_message)
+        |> actor.start
+
+      //add new actor to list
+      let new_workers = list.append(workers, [#(n, actor.data)])
+      //recurse until n actors have been made
+      start_workers(n - 1, topology, algorithm, new_workers, monitor)
+    }
+    False -> {
+      //once all actors have been created, set up topology
+      assign_neighbors(list.length(workers), topology, workers)
+      workers
+    }
+  }
+}
+
+pub fn assign_neighbors(
+  n: Int,
+  topology: String,
+  actors: List(#(Int, Subject(Message))),
+) {
+  case n {
+    //if n=0, we are done, else treat the current actor
+    0 -> io.println("full topology created")
+    _ -> {
+      //get nth actor
+      let assert Ok(result) = list.find(actors, fn(x) { pair.first(x) == n })
+      let subject = pair.second(result)
+      //send neighbors to actor based on topology
+      case topology {
+        "full" -> {
+          //actor gets every actor as neighbor except itself
+          actor.send(
+            subject,
+            NeighborSetUp(list.filter(actors, fn(x) { x.0 != n })),
+          )
         }
-        False -> {
-          //if neither first or last, gets two neighbors
-          let prev = list.find(actors, fn(x) { pair.first(x) == n - 2 })
-          let next = list.find(actors, fn(x) { pair.first(x) == n })
-          let neighbors_prev = case prev {
-            Ok(val) -> [val]
-            Error(_) -> []
-          }
-          let neighbors = case next {
-            Ok(val) -> list.append(neighbors_prev, [val])
-            Error(_) -> neighbors_prev
-          }
-          neighbors
+        "3D" -> {
+          let neighbors = get_3d_neighbors(n, actors)
+          actor.send(subject, NeighborSetUp(neighbors))
         }
+        "line" -> {
+          actor.send(
+            subject,
+            NeighborSetUp(
+              list.filter(actors, fn(x) { x.0 == n + 1 || x.0 == n - 1 }),
+            ),
+          )
+        }
+        "imp3D" -> {
+          io.println("imperfect 3d topology")
+          let neighbors = get_imp3d_neighbors(n, actors)
+          actor.send(subject, NeighborSetUp(neighbors))
+        }
+        _ -> io.println("invalid topology input")
       }
+
+      //recurse with next neighbor
+      assign_neighbors(n - 1, topology, actors)
     }
   }
 }
@@ -336,7 +361,7 @@ pub fn get_3d_neighbors(
         True -> {
           //find the neighbor's index
           let num = coords_to_num(x, grid_int)
-          case list.find(actors, fn(x) { pair.first(x) == num - 1 }) {
+          case list.find(actors, fn(x) { pair.first(x) == num }) {
             //neighbor gets added to neighbors list
             Ok(actor) -> Ok(actor)
             Error(_) -> Error(Nil)
@@ -355,13 +380,14 @@ pub fn get_imp3d_neighbors(
   //get the regular 3d grid neighbors
   let reg_neighbors = get_3d_neighbors(n, actors)
   //get list of other options to add
+  let self = list.find(actors, fn(x) { pair.first(x) == n })
   let others =
     list.filter(actors, fn(actor) {
       //any actor not already in neighbors list
-      !list.contains(reg_neighbors, actor)
+      !list.contains(reg_neighbors, actor) && self != Ok(actor)
     })
   //pick a random candidate to add
-  let rando = find_random_neighbor(others)
+  let rando = rand_neighbor(others)
 
   list.append(reg_neighbors, [rando])
 }
@@ -370,7 +396,7 @@ pub fn num_to_coords(n: Int, size: Int) -> #(Int, Int, Int) {
   //convert n to coordinates in 3d grid
   let x = { n - 1 } % size
   let y = { { n - 1 } / size } % size
-  let z = n / { size * size }
+  let z = { n - 1 } / { size * size }
 
   #(x, y, z)
 }
@@ -379,4 +405,35 @@ pub fn coords_to_num(coords: #(Int, Int, Int), size: Int) -> Int {
   //convert coordinates in grid to node number
   let #(x, y, z) = coords
   1 + x + y * size + z * size * size
+}
+
+pub fn get_perfect_cube(n: Int) -> Int {
+  //take cube root of n
+  let cube_root = float.power(int.to_float(n), 1.0 /. 3.0)
+  //round up to nearest whole number
+  let whole_cube_root = float.ceiling(result.unwrap(cube_root, 0.0))
+  //cube the new root to get a perfect cube value for n
+  let perf_cube =
+    float.round(result.unwrap(float.power(whole_cube_root, 3.0), 0.0))
+  perf_cube
+}
+
+pub fn rand_neighbor_subj(
+  list: List(#(Int, Subject(Message))),
+) -> process.Subject(Message) {
+  let size = list.length(list)
+  let rando = int.random(size) + 1
+  let index_split = list.take(list, rando)
+  let assert Ok(neighbor) = list.last(index_split)
+  neighbor.1
+}
+
+pub fn rand_neighbor(
+  list: List(#(Int, Subject(Message))),
+) -> #(Int, Subject(Message)) {
+  let size = list.length(list)
+  let rando = int.random(size) + 1
+  let index_split = list.take(list, rando)
+  let assert Ok(neighbor) = list.last(index_split)
+  neighbor
 }
