@@ -59,7 +59,7 @@ pub fn main() -> Nil {
           io.println("Invalid algorithm")
         }
       }
-      case receive(reply_subject, 5000) {
+      case receive(reply_subject, 1_000_000) {
         // timeout in ms
         Ok(time_end) -> {
           let duration = timestamp.difference(time_start, time_end)
@@ -184,29 +184,26 @@ fn worker_handle_message(
       }
     }
     Gossip(rumor) -> {
-      //if you still have more time to hear the rumor
-      case state.val2 >. 0.0 {
-        True -> {
-          case state.val1 == 0.0 {
-            True -> {
-              //actor has reached convergence
-              actor.send(state.monitor, Update)
-            }
-            False -> Nil
-          }
-          let new_count = float.subtract(state.val2, 1.0)
-          let neighbor = rand_neighbor_subj(state.neighbors)
-          actor.send(neighbor, Gossip(rumor))
-          let new_state =
-            State(rumor, new_count, 0, state.neighbors, state.monitor)
-          actor.continue(new_state)
-        }
-        False -> {
-          io.println("I will no longer hear the rumor")
+      //pick neighbor, pass rumor along
+      let neighbor = rand_neighbor_subj(state.neighbors)
+      actor.send(neighbor, Gossip(rumor))
+
+      //now update yourself
+      case state.val2 {
+        //last time receiving rumor
+        0.0 -> {
+          //io.println("I've heard enough!")
+          actor.send(state.monitor, Update)
           actor.stop()
         }
+        _ -> {
+          //io.println("waiting to hear rumor again")
+          let new_val = state.val2 -. 1.0
+          let new_state =
+            State(rumor, new_val, 0, state.neighbors, state.monitor)
+          actor.continue(new_state)
+        }
       }
-      actor.stop()
     }
     NeighborSetUp(neighbors) -> {
       //receive list of neighbors
@@ -286,7 +283,7 @@ pub fn assign_neighbors(
 ) {
   case n {
     //if n=0, we are done, else treat the current actor
-    0 -> io.println("full topology created")
+    0 -> Nil
     _ -> {
       //get nth actor
       let assert Ok(result) = list.find(actors, fn(x) { pair.first(x) == n })
@@ -313,7 +310,6 @@ pub fn assign_neighbors(
           )
         }
         "imp3D" -> {
-          io.println("imperfect 3d topology")
           let neighbors = get_imp3d_neighbors(n, actors)
           actor.send(subject, NeighborSetUp(neighbors))
         }
