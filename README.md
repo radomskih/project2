@@ -1,24 +1,3 @@
 # project2
 
-[![Package Version](https://img.shields.io/hexpm/v/project2)](https://hex.pm/packages/project2)
-[![Hex Docs](https://img.shields.io/badge/hex-docs-ffaff3)](https://hexdocs.pm/project2/)
-
-```sh
-gleam add project2@1
-```
-```gleam
-import project2
-
-pub fn main() -> Nil {
-  // TODO: An example of the project in use
-}
-```
-
-Further documentation can be found at <https://hexdocs.pm/project2>.
-
-## Development
-
-```sh
-gleam run   # Run the project
-gleam test  # Run the tests
-```
+plots for different topologies with num = [5,10,100,1_000,10_000]. push-sum full topology for num=10_000 kept timing out, so I have a plot without it, and a plot with a high value to show it is slower. Up to you what to do, and I can remake if necessary
