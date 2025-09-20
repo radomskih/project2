@@ -1,3 +1,4 @@
 # project2
 
-plots for different topologies with num = [5,10,100,1_000,10_000]. push-sum full topology for num=10_000 kept timing out, so I have a plot without it, and a plot with a high value to show it is slower. Up to you what to do, and I can remake if necessary
+SO we have ticks now and it seems to work overall. I have set a threshold of 95% of nodes finishing rather than 100% because there is always a chance of some getting stuck after all the others have finished, especially in line topology. We could change it to whatever works best for each topology. The other thing that is variable is the amount of time each tick takes-I have it set to 1 right now for small topologies, but larger might be better for larger topologies to minimize the number of self messages in the system. Also the number of times a node has to hear a message before stopping. I have it set to notify the monitor the first time it hears it and to stop after hearing it 10 times, but for larger topologies we might want it to stay active for longer.
+Hopefully it all makes sense!
