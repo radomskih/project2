@@ -1,5 +1,5 @@
 import argv
-import gleam/erlang/process.{type Subject, receive}
+import gleam/erlang/process.{type Subject, receive, send_after}
 import gleam/float
 import gleam/int
 import gleam/io
@@ -27,14 +27,6 @@ pub fn main() -> Nil {
       //set up monitor
       let reply_subject = process.new_subject()
 
-      let monitor_state = MonitorState(0, 1, reply_subject)
-      let assert Ok(monitor) =
-        actor.new(monitor_state)
-        |> actor.on_message(monitor_handle_message)
-        |> actor.start
-
-      //set up actors
-      let empty_actors = []
       //round n to nearest perfect cube if necessary
       let n = case topology {
         "3D" -> get_perfect_cube(n)
@@ -42,24 +34,36 @@ pub fn main() -> Nil {
         _ -> n
       }
 
+      let finish_num = float.round(int.to_float(n) *. 0.95)
+
+      let monitor_state = MonitorState(0, finish_num, reply_subject)
+      let assert Ok(monitor) =
+        actor.new(monitor_state)
+        |> actor.on_message(monitor_handle_message)
+        |> actor.start
+
+      //set up actors
+      let empty_actors = []
+
       let actors =
         start_workers(n, topology, algorithm, empty_actors, monitor.data)
 
+      io.println("topology created, time starts now")
       let time_start = timestamp.system_time()
       //start actors
       let random_actor = rand_neighbor_subj(actors)
       case algorithm {
         "gossip" -> {
-          actor.send(random_actor, Gossip(8.0))
+          actor.send(random_actor, GossipStart(8.0))
         }
         "push-sum" -> {
-          actor.send(random_actor, Start)
+          actor.send(random_actor, PushSumStart)
         }
         _ -> {
           io.println("Invalid algorithm")
         }
       }
-      case receive(reply_subject, 1_000_000) {
+      case receive(reply_subject, 50_000) {
         // timeout in ms
         Ok(time_end) -> {
           let duration = timestamp.difference(time_start, time_end)
@@ -74,7 +78,7 @@ pub fn main() -> Nil {
 
 ///tracker
 pub type MonitorMessage {
-  Update
+  Update(index: Int)
 }
 
 pub type MonitorState {
@@ -93,13 +97,15 @@ fn monitor_handle_message(
   message: MonitorMessage,
 ) -> actor.Next(MonitorState, MonitorMessage) {
   case message {
-    Update -> {
+    Update(_index) -> {
       let new_count = state.count + 1
-      io.println("received convergence message")
+      //io.println("node " <> int.to_string(index) <> " completed!")
+      io.println(int.to_string(new_count) <> " nodes converged")
       case new_count == state.total {
         True -> {
           // all actors have converged, notify main process
           let now = timestamp.system_time()
+          io.println("Reached convergence! Time stops now.")
           actor.send(state.reply_to, now)
           actor.stop()
         }
@@ -115,22 +121,32 @@ fn monitor_handle_message(
 ///worker message def
 pub type Message {
   PushSum(sum: Float, weight: Float)
-  Gossip(Float)
-  NeighborSetUp(List(#(Int, Subject(Message))))
-  Start
+  Gossip(rumor: Float)
+  ContactsSetUp(List(#(Int, Subject(Message))), List(Subject(Message)))
+  PushSumStart
+  GossipStart(rumor: Float)
+  PushSumTick
+  GossipTick
 }
 
 pub type State {
   State(
-    val1: Float,
     //rumor for gossip, sum for push-sum
-    val2: Float,
+    val1: Float,
     //num times heard for gossip, weight for push-sum
+    val2: Float,
+    //only used for push-sum, number of times ratio is unchanged
     val3: Int,
-    //stays 0 for gossip, num times unchanged for push-sum
+    //list of node's neighbors
     neighbors: List(#(Int, Subject(Message))),
-    //neighbors, assigned based on topology
+    //where to send convergence notification
     monitor: Subject(MonitorMessage),
+    //index of self
+    index: Int,
+    //sum/weight ratio from previous round, used in push-sum
+    prev_ratio: Float,
+    //where to send messages to self
+    self: List(Subject(Message)),
   )
 }
 
@@ -142,35 +158,157 @@ fn worker_handle_message(
 ) -> actor.Next(State, Message) {
   case message {
     PushSum(sum, weight) -> {
-      //do push sum alg:
-      //update new sum/weight
-      let curr_sum = state.val1 +. sum
-      let halved_sum = curr_sum /. 2.0
-      let curr_weight = state.val2 +. weight
-      let halved_weight = curr_weight /. 2.0
-      //pick random neighbor to pass half to
-      let subject = rand_neighbor_subj(state.neighbors)
-      //send half of new sum and weight to neighbor
-      actor.send(subject, PushSum(halved_sum, halved_weight))
+      //receiving push sum message
+      //take in new values
+      let new_sum = state.val1 +. sum
+      let new_weight = state.val2 +. weight
+      //update state
+      let new_state =
+        State(
+          new_sum,
+          new_weight,
+          state.val3,
+          state.neighbors,
+          state.monitor,
+          state.index,
+          state.prev_ratio,
+          state.self,
+        )
 
-      //calculate ratio to check convergence
-      let prev_ratio = state.val1 /. state.val2
-      let curr_ratio = halved_sum /. halved_weight
-      //if no change, update count
-      let num_repeats = case
-        float.absolute_value(prev_ratio -. curr_ratio) <=. 1.0e-10
-      {
-        True -> state.val3 + 1
-        False -> 0
+      //if it is your first message, start a tick for yourself
+      case state.prev_ratio {
+        0.0 -> {
+          let assert Ok(self) = list.first(state.self)
+          send_after(self, 1, PushSumTick)
+          Nil
+        }
+        _ -> Nil
       }
-
-      case num_repeats == 3 {
+      //continue
+      actor.continue(new_state)
+    }
+    Gossip(rumor) -> {
+      //receiving gossip rumor
+      case state.val2 <=. 0.0 {
+        //last time receiving rumor
         True -> {
-          actor.send(state.monitor, Update)
           actor.stop()
         }
         False -> {
-          //set new state and continue
+          //first time receiving rumor
+          case state.val1 == 0.0 {
+            True -> {
+              //let monitor know you heard it
+              actor.send(state.monitor, Update(state.index))
+              //io.println(int.to_string(state.index) <> " sent to monitor")
+              //set up your own ticks
+              let assert Ok(self) = list.first(state.self)
+              send_after(self, 1, GossipTick)
+              Nil
+            }
+            //not first time or last, no special action
+            False -> Nil
+          }
+          //continue with new value, decrementing the number of times left until quitting
+          let new_val = state.val2 -. 1.0
+          let new_state =
+            State(
+              rumor,
+              new_val,
+              0,
+              state.neighbors,
+              state.monitor,
+              state.index,
+              state.prev_ratio,
+              state.self,
+            )
+          //continue 
+          actor.continue(new_state)
+        }
+      }
+    }
+    ContactsSetUp(neighbors, self) -> {
+      //receive list of neighbors and subject for self
+      let new_state =
+        State(
+          state.val1,
+          state.val2,
+          0,
+          neighbors,
+          state.monitor,
+          state.index,
+          state.prev_ratio,
+          self,
+        )
+      actor.continue(new_state)
+    }
+    PushSumStart -> {
+      //starting push-sum algorithm
+      let assert Ok(self) = list.first(state.self)
+      //send the first tick, indicating the first round is starting
+      actor.send(self, PushSumTick)
+      //continue as you are
+      actor.continue(state)
+    }
+    GossipStart(rumor) -> {
+      //starting gossip algorithm
+      let assert Ok(self) = list.first(state.self)
+      //set state with rumor value and decrement count until stopping
+      let new_state =
+        State(
+          rumor,
+          state.val2 -. 1.0,
+          0,
+          state.neighbors,
+          state.monitor,
+          state.index,
+          state.prev_ratio,
+          state.self,
+        )
+      //start first round via tick
+      actor.send(self, GossipTick)
+      //continue with updates state
+      actor.continue(new_state)
+    }
+    PushSumTick -> {
+      //tick represents the start/end of a round
+      //get current half values
+      let halved_sum = state.val1 /. 2.0
+      let halved_weight = state.val2 /. 2.0
+
+      //send vals to neighbor
+      let random = rand_neighbor_subj(state.neighbors)
+      actor.send(random, PushSum(halved_sum, halved_weight))
+
+      //calculate new ratio
+      let new_ratio = halved_sum /. halved_weight
+
+      //check convergence 
+      let num_repeats = case
+        float.absolute_value(state.prev_ratio -. new_ratio) <=. 1.0e-10
+      {
+        True -> {
+          //if no change, update count 
+          state.val3 + 1
+        }
+        False -> {
+          //if changed, reset count
+          0
+        }
+      }
+
+      case num_repeats >= 3 {
+        //if no change for three rounds, tell monitor and stop
+        True -> {
+          actor.send(state.monitor, Update(state.index))
+          actor.stop()
+        }
+        False -> {
+          //if not converged, set new tick for next round
+          let assert Ok(subject) = list.first(state.self)
+          send_after(subject, 1, PushSumTick)
+
+          //set new state with halved values, new repeat count, and new ratio
           let new_state =
             State(
               halved_sum,
@@ -178,50 +316,24 @@ fn worker_handle_message(
               num_repeats,
               state.neighbors,
               state.monitor,
+              state.index,
+              new_ratio,
+              state.self,
             )
           actor.continue(new_state)
         }
       }
     }
-    Gossip(rumor) -> {
-      //pick neighbor, pass rumor along
+    GossipTick -> {
+      //pick neighbor, pass rumor along with your id
+      io.println("tick for " <> int.to_string(state.index))
       let neighbor = rand_neighbor_subj(state.neighbors)
-      actor.send(neighbor, Gossip(rumor))
+      actor.send(neighbor, Gossip(state.val1))
 
-      //now update yourself
-      case state.val2 {
-        //last time receiving rumor
-        0.0 -> {
-          //io.println("I've heard enough!")
-          actor.send(state.monitor, Update)
-          actor.stop()
-        }
-        _ -> {
-          //io.println("waiting to hear rumor again")
-          let new_val = state.val2 -. 1.0
-          let new_state =
-            State(rumor, new_val, 0, state.neighbors, state.monitor)
-          actor.continue(new_state)
-        }
-      }
-    }
-    NeighborSetUp(neighbors) -> {
-      //receive list of neighbors
-      let new_state = State(state.val1, state.val2, 0, neighbors, state.monitor)
-      actor.continue(new_state)
-    }
-    Start -> {
-      //only needed for push algorithm
-      //set values to half
-      let halved_sum = state.val1 /. 2.0
-      let halved_weight = state.val2 /. 2.0
-      //pick random neighbor to send values to
-      let subject = rand_neighbor_subj(state.neighbors)
-      actor.send(subject, PushSum(halved_sum, halved_weight))
-      //set up new state with half values
-      let new_state =
-        State(halved_sum, halved_weight, 0, state.neighbors, state.monitor)
-      actor.continue(new_state)
+      //set up next tick
+      let assert Ok(self) = list.first(state.self)
+      send_after(self, 1, GossipTick)
+      actor.continue(state)
     }
   }
 }
@@ -229,18 +341,18 @@ fn worker_handle_message(
 pub fn build_state(n: Int, algorithm: String, monitor: Subject(MonitorMessage)) {
   case algorithm {
     "gossip" -> {
-      State(0.0, 10.0, 0, [], monitor)
-      //val1 represents rumor, val2 = num times node has received rumor
+      State(0.0, 10.0, 0, [], monitor, n, 0.0, [])
+      //val1 represents rumor, val2 = num times node will receive rumor
     }
     "push-sum" -> {
       let n_float = int.to_float(n)
 
-      State(n_float, 1.0, 0, [], monitor)
+      State(n_float, 1.0, 0, [], monitor, n, 0.0, [])
       //val1 = sum, val2 = weight
     }
     _ -> {
       io.println("invalid algorithm input")
-      State(0.0, 0.0, 0, [], monitor)
+      State(0.0, 0.0, 0, [], monitor, n, 0.0, [])
     }
   }
 }
@@ -294,24 +406,25 @@ pub fn assign_neighbors(
           //actor gets every actor as neighbor except itself
           actor.send(
             subject,
-            NeighborSetUp(list.filter(actors, fn(x) { x.0 != n })),
+            ContactsSetUp(list.filter(actors, fn(x) { x.0 != n }), [subject]),
           )
         }
         "3D" -> {
           let neighbors = get_3d_neighbors(n, actors)
-          actor.send(subject, NeighborSetUp(neighbors))
+          actor.send(subject, ContactsSetUp(neighbors, [subject]))
         }
         "line" -> {
           actor.send(
             subject,
-            NeighborSetUp(
+            ContactsSetUp(
               list.filter(actors, fn(x) { x.0 == n + 1 || x.0 == n - 1 }),
+              [subject],
             ),
           )
         }
         "imp3D" -> {
           let neighbors = get_imp3d_neighbors(n, actors)
-          actor.send(subject, NeighborSetUp(neighbors))
+          actor.send(subject, ContactsSetUp(neighbors, [subject]))
         }
         _ -> io.println("invalid topology input")
       }
@@ -377,6 +490,7 @@ pub fn get_imp3d_neighbors(
   let reg_neighbors = get_3d_neighbors(n, actors)
   //get list of other options to add
   let self = list.find(actors, fn(x) { pair.first(x) == n })
+
   let others =
     list.filter(actors, fn(actor) {
       //any actor not already in neighbors list
@@ -433,3 +547,11 @@ pub fn rand_neighbor(
   let assert Ok(neighbor) = list.last(index_split)
   neighbor
 }
+//pub fn get_self(
+//n: Int,
+//list: List(#(Int, Subject(Message))),
+//) -> Subject(Message) {
+//let assert Ok(result) = list.find(list, fn(x) { pair.first(x) == n })
+//io.println(int.to_string(n) <> " accessing " <> int.to_string(result.0))
+//result.1
+//}
