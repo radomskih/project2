@@ -63,7 +63,7 @@ pub fn main() -> Nil {
           io.println("Invalid algorithm")
         }
       }
-      case receive(reply_subject, 10_000) {
+      case receive(reply_subject, 100_000) {
         // timeout in ms
         Ok(time_end) -> {
           let duration = timestamp.difference(time_start, time_end)
@@ -100,7 +100,7 @@ fn monitor_handle_message(
     Update(_index) -> {
       let new_count = state.count + 1
       //io.println("node " <> int.to_string(index) <> " completed!")
-      io.println(int.to_string(new_count) <> " nodes converged")
+      //io.println(int.to_string(new_count) <> " nodes converged")
       case new_count == state.total {
         True -> {
           // all actors have converged, notify main process
@@ -190,15 +190,15 @@ fn worker_handle_message(
       case state.val2 <=. 0.0 {
         //last time receiving rumor
         True -> {
-          //let monitor know you heard it
-          actor.send(state.monitor, Update(state.index))
-
           actor.stop()
         }
         False -> {
           //first time receiving rumor
           case state.val1 == 0.0 {
             True -> {
+              //let monitor know you heard it
+              actor.send(state.monitor, Update(state.index))
+
               //set up your own ticks
               let assert Ok(self) = list.first(state.self)
               send_after(self, 1, GossipTick)
@@ -312,7 +312,7 @@ fn worker_handle_message(
 pub fn build_state(n: Int, algorithm: String, monitor: Subject(MonitorMessage)) {
   case algorithm {
     "gossip" -> {
-      State(0.0, 10.0, 0, [], monitor, n, 0.0, [])
+      State(0.0, 50.0, 0, [], monitor, n, 0.0, [])
       //val1 represents rumor, val2 = num times node will receive rumor
     }
     "push-sum" -> {
