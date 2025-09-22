@@ -33,7 +33,7 @@ pub fn main() -> Nil {
         "imp3D" -> get_perfect_cube(n)
         _ -> n
       }
-
+      //set threshold for convergence
       let finish_num = float.round(int.to_float(n) *. 0.95)
 
       let monitor_state = MonitorState(0, finish_num, reply_subject)
@@ -48,7 +48,7 @@ pub fn main() -> Nil {
       let actors =
         start_workers(n, topology, algorithm, empty_actors, monitor.data)
 
-      io.println("topology created, time starts now")
+      io.println("Topology created! Time starts now.")
       let time_start = timestamp.system_time()
       //start actors
       let random_actor = rand_neighbor_subj(actors)
@@ -63,7 +63,7 @@ pub fn main() -> Nil {
           io.println("Invalid algorithm")
         }
       }
-      case receive(reply_subject, 50_000) {
+      case receive(reply_subject, 10_000) {
         // timeout in ms
         Ok(time_end) -> {
           let duration = timestamp.difference(time_start, time_end)
@@ -100,7 +100,7 @@ fn monitor_handle_message(
     Update(_index) -> {
       let new_count = state.count + 1
       //io.println("node " <> int.to_string(index) <> " completed!")
-      io.println(int.to_string(new_count) <> " nodes converged")
+      //io.println(int.to_string(new_count) <> " nodes converged")
       case new_count == state.total {
         True -> {
           // all actors have converged, notify main process
@@ -200,7 +200,7 @@ fn worker_handle_message(
             True -> {
               //let monitor know you heard it
               actor.send(state.monitor, Update(state.index))
-              //io.println(int.to_string(state.index) <> " sent to monitor")
+
               //set up your own ticks
               let assert Ok(self) = list.first(state.self)
               send_after(self, 1, GossipTick)
@@ -326,7 +326,7 @@ fn worker_handle_message(
     }
     GossipTick -> {
       //pick neighbor, pass rumor along with your id
-      io.println("tick for " <> int.to_string(state.index))
+      //io.println("tick for " <> int.to_string(state.index))
       let neighbor = rand_neighbor_subj(state.neighbors)
       actor.send(neighbor, Gossip(state.val1))
 
@@ -341,7 +341,7 @@ fn worker_handle_message(
 pub fn build_state(n: Int, algorithm: String, monitor: Subject(MonitorMessage)) {
   case algorithm {
     "gossip" -> {
-      State(0.0, 5.0, 0, [], monitor, n, 0.0, [])
+      State(0.0, 10.0, 0, [], monitor, n, 0.0, [])
       //val1 represents rumor, val2 = num times node will receive rumor
     }
     "push-sum" -> {
