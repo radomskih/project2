@@ -6,16 +6,18 @@ Team Members: Patriel Stapleton and Helen Radomski
 Note: Topology set-up generally took much longer than convergence algorithms and provided the limit on size.
 
 Gossip Algorithm (0.95 Convergence)	
-Full Topology   10,000 - 30.53
-3D Topology     100,000 - 13.29
-Line Topology	 1,000 - 9.63
-Imperfect 3D	10,000 - 1.99
+Toplogy         Nodes (N)   Time (s)
+Full Topology   10,000      30.53
+3D Topology     100,000     13.29
+Line Topology   1,000       9.63
+Imperfect 3D	10,000      1.99
 
 Push-Sum Algorithm (0.95 Convergence)
-Full Topology	 10,000 - 8.04
-3D Topology	    60,000 - 4.15
-Line Topology	100 - 1.24
-Imperfect 3D 	60,000 - 4.28
+Toplogy         Nodes (N)   Time (s)
+Full Topology	10,000      8.04
+3D Topology	    60,000      4.15
+Line Topology	100         1.24
+Imperfect 3D 	60,000      4.28
 
 
 # What is Working
