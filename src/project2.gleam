@@ -34,7 +34,7 @@ pub fn main() -> Nil {
         _ -> n
       }
       //set threshold for convergence
-      let finish_num = float.round(int.to_float(n) *. 0.95)
+      let finish_num = float.round(int.to_float(n) *. 1.0)
 
       let monitor_state = MonitorState(0, finish_num, reply_subject)
       let assert Ok(monitor) =
@@ -54,10 +54,10 @@ pub fn main() -> Nil {
       let random_actor = rand_neighbor_subj(actors)
       case algorithm {
         "gossip" -> {
-          actor.send(random_actor, GossipStart(8.0))
+          actor.send(random_actor, Gossip(8.0))
         }
         "push-sum" -> {
-          actor.send(random_actor, PushSumStart)
+          actor.send(random_actor, PushSum(0.0, 0.0))
         }
         _ -> {
           io.println("Invalid algorithm")
@@ -100,7 +100,7 @@ fn monitor_handle_message(
     Update(_index) -> {
       let new_count = state.count + 1
       //io.println("node " <> int.to_string(index) <> " completed!")
-      //io.println(int.to_string(new_count) <> " nodes converged")
+      io.println(int.to_string(new_count) <> " nodes converged")
       case new_count == state.total {
         True -> {
           // all actors have converged, notify main process
@@ -123,8 +123,6 @@ pub type Message {
   PushSum(sum: Float, weight: Float)
   Gossip(rumor: Float)
   ContactsSetUp(List(#(Int, Subject(Message))), List(Subject(Message)))
-  PushSumStart
-  GossipStart(rumor: Float)
   PushSumTick
   GossipTick
 }
@@ -192,15 +190,15 @@ fn worker_handle_message(
       case state.val2 <=. 0.0 {
         //last time receiving rumor
         True -> {
+          //let monitor know you heard it
+          actor.send(state.monitor, Update(state.index))
+
           actor.stop()
         }
         False -> {
           //first time receiving rumor
           case state.val1 == 0.0 {
             True -> {
-              //let monitor know you heard it
-              actor.send(state.monitor, Update(state.index))
-
               //set up your own ticks
               let assert Ok(self) = list.first(state.self)
               send_after(self, 1, GossipTick)
@@ -242,34 +240,7 @@ fn worker_handle_message(
         )
       actor.continue(new_state)
     }
-    PushSumStart -> {
-      //starting push-sum algorithm
-      let assert Ok(self) = list.first(state.self)
-      //send the first tick, indicating the first round is starting
-      actor.send(self, PushSumTick)
-      //continue as you are
-      actor.continue(state)
-    }
-    GossipStart(rumor) -> {
-      //starting gossip algorithm
-      let assert Ok(self) = list.first(state.self)
-      //set state with rumor value and decrement count until stopping
-      let new_state =
-        State(
-          rumor,
-          state.val2 -. 1.0,
-          0,
-          state.neighbors,
-          state.monitor,
-          state.index,
-          state.prev_ratio,
-          state.self,
-        )
-      //start first round via tick
-      actor.send(self, GossipTick)
-      //continue with updates state
-      actor.continue(new_state)
-    }
+
     PushSumTick -> {
       //tick represents the start/end of a round
       //get current half values
