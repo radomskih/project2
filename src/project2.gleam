@@ -341,7 +341,7 @@ fn worker_handle_message(
 pub fn build_state(n: Int, algorithm: String, monitor: Subject(MonitorMessage)) {
   case algorithm {
     "gossip" -> {
-      State(0.0, 10.0, 0, [], monitor, n, 0.0, [])
+      State(0.0, 5.0, 0, [], monitor, n, 0.0, [])
       //val1 represents rumor, val2 = num times node will receive rumor
     }
     "push-sum" -> {
@@ -532,8 +532,9 @@ pub fn rand_neighbor_subj(
   list: List(#(Int, Subject(Message))),
 ) -> process.Subject(Message) {
   let size = list.length(list)
-  let rando = int.random(size)
-  let neighbor = find_neighbor(list, rando, 0)
+  let rando = int.random(size) + 1
+  let index_split = list.take(list, rando)
+  let assert Ok(neighbor) = list.last(index_split)
   neighbor.1
 }
 
@@ -541,27 +542,16 @@ pub fn rand_neighbor(
   list: List(#(Int, Subject(Message))),
 ) -> #(Int, Subject(Message)) {
   let size = list.length(list)
-  let rando = int.random(size)
-  let neighbor = find_neighbor(list, rando, 0)
+  let rando = int.random(size) + 1
+  let index_split = list.take(list, rando)
+  let assert Ok(neighbor) = list.last(index_split)
   neighbor
 }
-
-pub fn find_neighbor(
-  list: List(#(Int, Subject(Message))),
-  goal: Int,
-  index: Int,
-) -> #(Int, Subject(Message)) {
-  case index == goal {
-    True -> {
-      //Target is at front of the list
-      let assert Ok(result) = list.first(list)
-      result
-    }
-    False -> {
-      //target is deeper in the list, reove first 
-      let assert Ok(new_list) = list.rest(list)
-      let new_index = index + 1
-      find_neighbor(new_list, goal, new_index)
-    }
-  }
-}
+//pub fn get_self(
+//n: Int,
+//list: List(#(Int, Subject(Message))),
+//) -> Subject(Message) {
+//let assert Ok(result) = list.find(list, fn(x) { pair.first(x) == n })
+//io.println(int.to_string(n) <> " accessing " <> int.to_string(result.0))
+//result.1
+//}

@@ -1,4 +1,27 @@
 # project2
 
-SO we have ticks now and it seems to work overall. I have set a threshold of 95% of nodes finishing rather than 100% because there is always a chance of some getting stuck after all the others have finished, especially in line topology. We could change it to whatever works best for each topology. The other thing that is variable is the amount of time each tick takes-I have it set to 1 right now for small topologies, but larger might be better for larger topologies to minimize the number of self messages in the system. Also the number of times a node has to hear a message before stopping. I have it set to notify the monitor the first time it hears it and to stop after hearing it 10 times, but for larger topologies we might want it to stay active for longer.
-Hopefully it all makes sense!
+Team Members: Patriel Stapleton and Helen Radomski
+
+# Max Network Sizes and Times
+
+Gossip Algorithm (0.95 Convergence)	
+Full Topology   9300
+3D Topology     2100
+Line Topology	1900
+Imperfect 3D	2100
+
+Push-Sum Algorithm (1.0 Convergence)
+Full Topology	12500
+3D Topology	    60000
+Line Topology	20
+Imperfect 3D 	1500
+
+
+# What is Working
+All the alrogithms have been implemented as outlined in the project specifications.
+The gossip algorithm only performs efficently at 0.95 convergence thereshold.
+We go into more detail in the report.
+
+# What isn't Working
+The line and imperfect 3D topologies don't always reach convergence during the push-sum algorithm with repeated num 3.
+We wanted to use a seeded random number generator but the gleam stats library threw an error.
